@@ -1,0 +1,11 @@
+# 가사·음원 파일은 올리지 않음 (저작권)
+*.lrc
+*.mp3
+*.m4a
+*.wav
+*.flac
+*.ogg
+*.aac
+lyrics/
+audio/
+.DS_Store

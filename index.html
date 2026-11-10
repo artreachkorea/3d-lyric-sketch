@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>3D 리릭 스케치</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gaegu:wght@400;700&display=swap">
+<style>
+html{color-scheme:light}
+body{margin:0;font-size:14px}
+img{max-width:100%}
+[hidden]{display:none!important}
+</style>
+<style>
+/* Layout: one full-screen sketchbook page. The 3D canvas is the page; a thin pencil-ruled control strip sits at the bottom. */
+:root{
+  --paper:#e9eff1; --paper-2:#dbe4e8; --ink:#17283a; --ink-soft:#5d7183; --accent:#0b7f8c; --warn:#a2452a;
+  --hand:"Gaegu","Nanum Pen Script","Apple SD Gothic Neo","Malgun Gothic",cursive;
+  --ui:system-ui,-apple-system,"Apple SD Gothic Neo","Malgun Gothic","Segoe UI",sans-serif;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0b1721; --paper-2:#12222f; --ink:#dce7ec; --ink-soft:#8399a8; --accent:#62d2da; --warn:#f0a184;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0b1721; --paper-2:#12222f; --ink:#dce7ec; --ink-soft:#8399a8; --accent:#62d2da; --warn:#f0a184;
+  color-scheme:dark;
+}
+html,body{height:100%}
+body{background:var(--paper);color:var(--ink);font-family:var(--ui);overflow:hidden;position:relative}
+#stage{position:absolute;inset:0;width:100%;height:100%;display:block}
+.label{
+  position:absolute;top:0;left:0;
+  padding-top:12px;
+  padding-left:max(16px, env(safe-area-inset-left, 0px));
+  padding-right:max(16px, env(safe-area-inset-right, 0px));
+  font-family:var(--hand);font-weight:700;font-size:1.35rem;line-height:1.1;pointer-events:none;
+}
+.label small{display:block;font-family:var(--ui);font-weight:400;font-size:.72rem;letter-spacing:.04em;color:var(--ink-soft);margin-top:2px}
+.bar{
+  position:absolute;left:0;right:0;bottom:0;
+  padding-block:10px;
+  padding-left:max(16px, env(safe-area-inset-left, 0px));
+  padding-right:max(16px, env(safe-area-inset-right, 0px));
+  background:color-mix(in srgb, var(--paper) 86%, transparent);
+  border-top:1.5px dashed var(--ink-soft);
+  display:flex;flex-direction:column;gap:8px;
+}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px}
+.btn{
+  font-family:var(--hand);font-weight:700;font-size:1.15rem;line-height:1;
+  color:var(--ink);background:var(--paper);
+  border:1.5px solid var(--ink);border-radius:3px 9px 4px 8px;
+  padding:7px 14px 8px;cursor:pointer;white-space:nowrap;
+}
+.btn:hover{background:var(--paper-2)}
+.btn.primary{background:var(--ink);color:var(--paper);min-width:5.2em}
+.btn.primary:hover{background:var(--accent);border-color:var(--accent)}
+.btn:focus-visible,.pick:focus-within{outline:2px solid var(--accent);outline-offset:2px}
+.pick{position:relative;display:inline-block}
+.pick input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}
+#scrub{flex:1 1 140px;min-width:0;accent-color:var(--accent)}
+#clock{font-variant-numeric:tabular-nums;font-size:.8rem;color:var(--ink-soft);white-space:nowrap}
+#status{font-size:.78rem;color:var(--ink-soft);min-width:0;flex:1 1 200px}
+#status.err{color:var(--warn)}
+.drop{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  background:color-mix(in srgb, var(--paper) 80%, transparent);
+  font-family:var(--hand);font-weight:700;font-size:2rem;border:3px dashed var(--accent);pointer-events:none}
+</style>
+</head>
+<body>
+
+<canvas id="stage" aria-label="물결 스케치 3D 장면과 가사"></canvas>
+
+<div class="label">3D 리릭 스케치<small>가사와 음원은 내 파일로 재생 · 브라우저 안에서만 읽힘</small></div>
+
+<div class="bar">
+  <div class="row">
+    <button class="btn primary" id="play" type="button">재생</button>
+    <input id="scrub" type="range" min="0" max="24" step="0.01" value="0" aria-label="재생 위치">
+    <span id="clock">0:00 / 0:24</span>
+  </div>
+  <div class="row">
+    <label class="btn pick">가사 파일 (.lrc)<input id="lrcFile" type="file" accept=".lrc,.txt,text/plain"></label>
+    <label class="btn pick">음원 파일<input id="audioFile" type="file" accept="audio/*"></label>
+    <span id="status">예시 문장 표시 중 · 가사 파일을 올리면 그 가사로 바뀝니다 (끌어다 놓기 가능)</span>
+  </div>
+</div>
+<div class="drop" id="drop" hidden>여기에 놓기</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+'use strict';
+var $=function(id){return document.getElementById(id);};
+var statusEl=$('status'), playBtn=$('play'), scrub=$('scrub'), clockEl=$('clock');
+function setStatus(msg,err){statusEl.textContent=msg;statusEl.className=err?'err':'';}
+
+if(!window.THREE){setStatus('3D 라이브러리를 불러오지 못했습니다. 네트워크를 확인해 주세요.',true);return;}
+
+/* ---------- helpers ---------- */
+function hash(n){var s=Math.sin(n*127.1+311.7)*43758.5453;return s-Math.floor(s);}
+function lerp(a,b,k){return a+(b-a)*k;}
+function fmt(s){s=Math.max(0,s||0);var m=Math.floor(s/60),r=Math.floor(s%60);return m+':'+(r<10?'0':'')+r;}
+function token(name){return getComputedStyle(document.documentElement).getPropertyValue(name).trim();}
+
+/* ---------- lyrics ---------- */
+var DEMO=[
+  {t:0.6,text:'여기에 가사가 크게 나옵니다'},
+  {t:4.4,text:'LRC 파일을 올리면'},
+  {t:7.6,text:'시간에 맞춰 한 줄씩'},
+  {t:11.0,text:'물 위에 그려집니다'},
+  {t:14.6,text:'DROP YOUR LRC FILE'},
+  {t:18.4,text:'음원 파일도 함께 올려보세요'}
+];
+var lyrics=DEMO, lyricsPlain=false, lyricsEnd=24;
+
+function parseLyrics(src){
+  var out=[],timed=false,re=/\[(\d{1,3}):(\d{1,2}(?:[.:]\d{1,3})?)\]/g;
+  var rows=src.split(/\r?\n/);
+  for(var i=0;i<rows.length;i++){
+    var raw=rows[i],stamps=[],m,last=0;re.lastIndex=0;
+    while((m=re.exec(raw))){stamps.push(parseInt(m[1],10)*60+parseFloat(m[2].replace(':','.')));last=re.lastIndex;}
+    if(stamps.length){
+      timed=true;
+      var text=raw.slice(last).replace(/<\d+:\d+(?:\.\d+)?>/g,'').trim();
+      for(var k=0;k<stamps.length;k++)out.push({t:stamps[k],text:text});
+    }
+  }
+  if(!timed){
+    var n=0;
+    for(var j=0;j<rows.length;j++){
+      var tx=rows[j].trim();
+      if(!tx||/^\[.*\]$/.test(tx))continue;
+      out.push({t:1+n*3.5,text:tx});n++;
+    }
+  }
+  out.sort(function(a,b){return a.t-b.t;});
+  return {lines:out,plain:!timed};
+}
+function spreadPlain(dur){
+  var n=lyrics.length;
+  for(var i=0;i<n;i++)lyrics[i].t=dur*(0.04+0.92*i/n);
+}
+function setLyrics(res){
+  lyrics=res.lines;lyricsPlain=res.plain;
+  if(lyricsPlain&&audio&&isFinite(audio.duration))spreadPlain(audio.duration);
+  lyricsEnd=lyrics.length?lyrics[lyrics.length-1].t+6:24;
+  lastKey='';curIdx=-2;
+  var all='';for(var i=0;i<lyrics.length;i++)all+=lyrics[i].text;
+  if(document.fonts&&document.fonts.load){
+    document.fonts.load('700 64px Gaegu',all).then(function(){lastKey='';layoutCache=null;},function(){});
+  }
+  refreshDuration();
+}
+function lineDur(i){
+  var next=i+1<lyrics.length?lyrics[i+1].t:lyrics[i].t+5;
+  return Math.min(7,Math.max(0.6,next-lyrics[i].t));
+}
+function activeIndex(t){
+  var idx=-1;
+  for(var i=0;i<lyrics.length;i++){if(lyrics[i].t<=t)idx=i;else break;}
+  if(idx>=0&&t>lyrics[idx].t+lineDur(idx))return -1;
+  return idx;
+}
+
+/* ---------- three setup ---------- */
+var canvas=$('stage'),renderer;
+try{renderer=new THREE.WebGLRenderer({canvas:canvas,antialias:true});}
+catch(e){setStatus('이 브라우저에서 WebGL을 쓸 수 없어 3D 장면을 그리지 못했습니다.',true);return;}
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
+var scene=new THREE.Scene();
+scene.fog=new THREE.Fog(0xffffff,16,72);
+var camera=new THREE.PerspectiveCamera(55,1,0.1,200);
+
+var matInk=new THREE.LineBasicMaterial({transparent:true,opacity:0.9});
+var matInk2=new THREE.LineBasicMaterial({transparent:true,opacity:0.32});
+var matBubble=new THREE.LineBasicMaterial({transparent:true,opacity:0.7});
+var matShaft=new THREE.LineBasicMaterial({transparent:true,opacity:0.28});
+var matMoon=new THREE.LineBasicMaterial({transparent:true,opacity:0.9,fog:false});
+var rippleMats=[];
+
+/* water: horizontal pencil strokes, each drawn twice */
+var WL=40,WP=110,X0=-62,X1=62,Z0=-58,Z1=40;
+function waveH(x,z,t){
+  return 0.55*Math.sin(0.22*x+t*0.9)+0.32*Math.sin(0.37*z+0.11*x-t*1.25)+0.14*Math.sin(0.83*x-0.61*z+t*2.1);
+}
+var water=[];
+for(var pass=0;pass<2;pass++){
+  for(var li=0;li<WL;li++){
+    var g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(WP*3),3));
+    var ln=new THREE.Line(g,pass?matInk2:matInk);
+    ln.frustumCulled=false;scene.add(ln);
+    water.push({line:ln,pass:pass,li:li,z:lerp(Z0,Z1,li/(WL-1))+(pass?0.3:0)});
+  }
+}
+function updateWater(t,tick,amp){
+  for(var w=0;w<water.length;w++){
+    var o=water[w],arr=o.line.geometry.attributes.position.array;
+    var jit=o.pass?0.16:0.06,seed=o.li*131+o.pass*7919+tick*977;
+    for(var j=0;j<WP;j++){
+      var x=lerp(X0,X1,j/(WP-1));
+      var z=o.z+(hash(seed+j*17+3)-0.5)*jit*2;
+      arr[j*3]=x+(hash(seed+j*29+11)-0.5)*jit;
+      arr[j*3+1]=waveH(x,z,t)*amp+(hash(seed+j*17)-0.5)*jit;
+      arr[j*3+2]=z;
+    }
+    o.line.geometry.attributes.position.needsUpdate=true;
+  }
+}
+
+function wobblyLoop(r,n,seed,amp){
+  var pts=[];
+  for(var i=0;i<n;i++){
+    var a=i/n*Math.PI*2,rr=r*(1+(hash(seed+i*13)-0.5)*amp);
+    pts.push(new THREE.Vector3(Math.cos(a)*rr,Math.sin(a)*rr,0));
+  }
+  return new THREE.BufferGeometry().setFromPoints(pts);
+}
+
+/* moon: scribbled circle with hatching */
+var moon=new THREE.Group();
+moon.position.set(-10,15,-50);
+for(var m=0;m<3;m++)moon.add(new THREE.LineLoop(wobblyLoop(7,64,m*101+5,0.06),matMoon));
+(function(){
+  var pts=[];
+  for(var i=-6;i<=6;i++){
+    var off=i*1.0,half=Math.sqrt(Math.max(0,49-off*off))*0.92;
+    var j1=(hash(i*7+1)-0.5)*0.6,j2=(hash(i*7+2)-0.5)*0.6;
+    /* diagonal hatch: line perpendicular offset `off`, running along (1,1) */
+    var nx=-0.7071,ny=0.7071,dx=0.7071,dy=0.7071;
+    pts.push(new THREE.Vector3(nx*off-dx*(half+j1),ny*off-dy*(half+j1),0));
+    pts.push(new THREE.Vector3(nx*off+dx*(half+j2),ny*off+dy*(half+j2),0));
+  }
+  var hatch=new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts),matShaft.clone());
+  hatch.material.fog=false;hatch.material.opacity=0.45;
+  moon.add(hatch);moon.userData.hatch=hatch;
+})();
+scene.add(moon);
+
+/* ripples on the surface */
+var ripples=[];
+for(var r=0;r<10;r++){
+  var rg=wobblyLoop(1,40,r*53+9,0.09);rg.rotateX(-Math.PI/2);
+  var rm=new THREE.LineBasicMaterial({transparent:true,opacity:0});
+  rippleMats.push(rm);
+  var rl=new THREE.LineLoop(rg,rm);
+  scene.add(rl);
+  ripples.push({mesh:rl,x:(hash(r*3+1)-0.5)*44,z:(hash(r*3+2)-0.5)*44,period:4+hash(r*3+3)*3,phase:hash(r*5+4)});
+}
+
+/* bubbles under the surface */
+var bubbleGeos=[wobblyLoop(1,22,11,0.14),wobblyLoop(1,22,23,0.14),wobblyLoop(1,22,37,0.14),wobblyLoop(1,22,51,0.14)];
+var bubbles=[];
+for(var b=0;b<56;b++){
+  var bl=new THREE.LineLoop(bubbleGeos[b%4],matBubble);
+  scene.add(bl);
+  bubbles.push({mesh:bl,x:(hash(b*9+1)-0.5)*50,z:(hash(b*9+2)-0.5)*50,speed:0.035+hash(b*9+3)*0.06,phase:hash(b*9+4),size:0.14+hash(b*9+5)*0.42});
+}
+
+/* slanted light shafts under water */
+(function(){
+  var pts=[];
+  for(var i=0;i<44;i++){
+    var x=(hash(i*4+1)-0.5)*70,z=(hash(i*4+2)-0.5)*70,len=8+hash(i*4+3)*12;
+    pts.push(new THREE.Vector3(x,-0.6,z));
+    pts.push(new THREE.Vector3(x+len*0.22,-0.6-len,z+len*0.06));
+  }
+  var shafts=new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts),matShaft);
+  scene.add(shafts);
+})();
+
+/* camera path: glide over the water, dive under, come back up */
+var path=new THREE.CatmullRomCurve3([
+  new THREE.Vector3(0,3.2,22),new THREE.Vector3(14,2.2,10),new THREE.Vector3(18,0.9,-4),
+  new THREE.Vector3(10,-3.6,-14),new THREE.Vector3(-4,-5.2,-10),new THREE.Vector3(-14,-2.2,0),
+  new THREE.Vector3(-16,2.6,12),new THREE.Vector3(-6,5,20)
+],true);
+var LOOP=48,center=new THREE.Vector3(0,0.6,0);
+var vA=new THREE.Vector3(),vB=new THREE.Vector3();
+function updateCamera(t,tick){
+  var u=((t/LOOP)%1+1)%1;
+  path.getPointAt(u,vA);path.getPointAt((u+0.06)%1,vB);
+  vB.lerp(center,0.55);
+  camera.position.copy(vA);
+  camera.position.x+=(hash(tick*3+1)-0.5)*0.05;
+  camera.position.y+=(hash(tick*3+2)-0.5)*0.05;
+  camera.lookAt(vB);
+  camera.rotateZ(Math.sin(t*0.31)*0.06);
+}
+
+/* ---------- lyric plane ---------- */
+var TD=9;
+var tcv=document.createElement('canvas'),tctx=tcv.getContext('2d');
+tcv.width=1536;tcv.height=768;
+var ttex=new THREE.CanvasTexture(tcv);
+ttex.minFilter=THREE.LinearFilter;ttex.generateMipmaps=false;
+var tmat=new THREE.MeshBasicMaterial({map:ttex,transparent:true,depthTest:false,depthWrite:false,fog:false,opacity:0});
+var tmesh=new THREE.Mesh(new THREE.PlaneGeometry(1,1),tmat);
+tmesh.renderOrder=10;tmesh.frustumCulled=false;scene.add(tmesh);
+var planeW=8,planeH=4;
+
+var colors={paper:'#e9eff1',ink:'#17283a',accent:'#0b7f8c'};
+var FONT='Gaegu,"Nanum Pen Script","Apple SD Gothic Neo","Malgun Gothic",cursive';
+var layoutCache=null,lastKey='',curIdx=-2;
+
+function layout(text){
+  var W=tcv.width,H=tcv.height,pad=W*0.06,maxW=W-2*pad;
+  var words=text.split(/\s+/).filter(Boolean),size,rows;
+  for(size=Math.round(H*0.36);size>36;size-=8){
+    tctx.font='700 '+size+'px '+FONT;
+    rows=[];var row=[],w=0,sp=size*0.28,ok=true;
+    for(var i=0;i<words.length;i++){
+      var ww=tctx.measureText(words[i]).width;
+      if(ww>maxW){ok=false;break;}
+      if(row.length&&w+sp+ww>maxW){rows.push({items:row,w:w});row=[];w=0;}
+      var x=row.length?w+sp:0;
+      row.push({t:words[i],w:ww,x:x,i:i});w=x+ww;
+    }
+    if(row.length)rows.push({items:row,w:w});
+    if(ok&&rows.length*size*1.08<=H-2*pad)break;
+  }
+  var lh=size*1.08,y0=(H-rows.length*lh)/2+lh/2,items=[];
+  for(var r=0;r<rows.length;r++){
+    var x0=(W-rows[r].w)/2;
+    for(var k=0;k<rows[r].items.length;k++){
+      var it=rows[r].items[k];
+      items.push({t:it.t,w:it.w,cx:x0+it.x+it.w/2,y:y0+r*lh});
+    }
+  }
+  var emph=-1,best=0;
+  if(items.length>1)for(var e=0;e<items.length;e++){if(items[e].t.length>best){best=items[e].t.length;emph=e;}}
+  return {text:text,size:size,items:items,emph:emph};
+}
+function drawText(L,revealed,tick,pop){
+  var W=tcv.width,H=tcv.height,size=L.size;
+  tctx.clearRect(0,0,W,H);
+  tctx.textAlign='center';tctx.textBaseline='middle';tctx.lineJoin='round';
+  tctx.font='700 '+size+'px '+FONT;
+  for(var i=0;i<revealed&&i<L.items.length;i++){
+    var it=L.items[i],s=i*41+tick*613;
+    var dx=(hash(s+1)-0.5)*size*0.035,dy=(hash(s+2)-0.5)*size*0.035,rot=(hash(s+3)-0.5)*0.05;
+    var sc=(i===revealed-1)?1+0.22*(1-pop):1;
+    tctx.save();
+    tctx.translate(it.cx+dx,it.y+dy);tctx.rotate(rot);tctx.scale(sc,sc);
+    tctx.strokeStyle=colors.paper;tctx.globalAlpha=0.9;tctx.lineWidth=size*0.24;
+    tctx.strokeText(it.t,0,0);
+    tctx.globalAlpha=1;
+    tctx.fillStyle=(i===L.emph)?colors.accent:colors.ink;
+    tctx.fillText(it.t,0,0);
+    tctx.globalAlpha=0.5;tctx.strokeStyle=colors.ink;tctx.lineWidth=Math.max(1.5,size*0.012);
+    tctx.strokeText(it.t,(hash(s+4)-0.5)*size*0.05,(hash(s+5)-0.5)*size*0.05);
+    tctx.globalAlpha=1;
+    if(i===L.emph){
+      tctx.strokeStyle=colors.accent;tctx.lineWidth=size*0.05;tctx.lineCap='round';
+      tctx.beginPath();
+      var n=8,uw=it.w*1.04,uy=size*0.52;
+      for(var k=0;k<=n;k++){
+        var px=-uw/2+uw*k/n,py=uy+(hash(s+20+k)-0.5)*size*0.07;
+        if(k)tctx.lineTo(px,py);else tctx.moveTo(px,py);
+      }
+      tctx.stroke();
+    }
+    tctx.restore();
+  }
+  ttex.needsUpdate=true;
+}
+
+var desired=new THREE.Vector3(),fwd=new THREE.Vector3(),rightV=new THREE.Vector3(),upV=new THREE.Vector3();
+var qTilt=new THREE.Quaternion(),qTarget=new THREE.Quaternion(),eul=new THREE.Euler();
+function updateLyric(t,dt,tick,level){
+  var idx=activeIndex(t);
+  camera.getWorldDirection(fwd);
+  desired.copy(camera.position).addScaledVector(fwd,TD);
+  if(idx<0||!lyrics[idx].text){tmat.opacity=Math.max(0,tmat.opacity-dt*5);curIdx=idx;return;}
+  var line=lyrics[idx],dur=lineDur(idx),p=(t-line.t)/dur;
+  if(!layoutCache||layoutCache.text!==line.text)layoutCache=layout(line.text);
+  var L=layoutCache,n=L.items.length;
+  var revealSpan=Math.min(dur*0.6,0.3*n),rp=revealSpan>0?Math.min(1,(t-line.t)/revealSpan):1;
+  var f=rp*n,revealed=Math.max(1,Math.min(n,Math.ceil(f))),pop=rp>=1?1:f-Math.floor(f);
+  if(idx!==curIdx){
+    curIdx=idx;
+    eul.set((hash(idx*7+1)-0.5)*0.16,(hash(idx*7+2)-0.5)*0.44,(hash(idx*7+3)-0.5)*0.14);
+    qTilt.setFromEuler(eul);
+    rightV.set(1,0,0).applyQuaternion(camera.quaternion);
+    upV.set(0,1,0).applyQuaternion(camera.quaternion);
+    var side=hash(idx*7+4)<0.5?-1:1;
+    tmesh.position.copy(desired).addScaledVector(rightV,side*2.4).addScaledVector(upV,-side*0.7);
+    tmesh.quaternion.copy(camera.quaternion).multiply(qTilt);
+  }
+  var k=1-Math.exp(-dt*3);
+  tmesh.position.lerp(desired,k);
+  qTarget.copy(camera.quaternion).multiply(qTilt);
+  tmesh.quaternion.slerp(qTarget,k);
+  var pulse=1+level*0.07;
+  tmesh.scale.set(planeW*pulse,planeH*pulse,1);
+  var fadeIn=Math.min(1,(t-line.t)/0.15),fadeOut=Math.min(1,(line.t+dur-t)/0.35);
+  tmat.opacity=Math.max(0,Math.min(fadeIn,fadeOut));
+  var key=idx+'|'+revealed+'|'+tick+'|'+Math.round(pop*4);
+  if(key!==lastKey){lastKey=key;drawText(L,revealed,tick,pop);}
+}
+
+/* ---------- theme + resize ---------- */
+function applyTheme(){
+  colors.paper=token('--paper')||colors.paper;
+  colors.ink=token('--ink')||colors.ink;
+  colors.accent=token('--accent')||colors.accent;
+  var soft=token('--ink-soft')||colors.ink;
+  renderer.setClearColor(new THREE.Color(colors.paper),1);
+  scene.fog.color.set(colors.paper);
+  matInk.color.set(colors.ink);matInk2.color.set(soft);matBubble.color.set(colors.ink);
+  matShaft.color.set(colors.accent);matMoon.color.set(colors.accent);
+  moon.userData.hatch.material.color.set(colors.accent);
+  for(var i=0;i<rippleMats.length;i++)rippleMats[i].color.set(colors.accent);
+  lastKey='';
+}
+function resize(){
+  var w=canvas.clientWidth||window.innerWidth,h=canvas.clientHeight||window.innerHeight;
+  renderer.setSize(w,h,false);
+  var aspect=w/h,portrait=aspect<1;
+  camera.aspect=aspect;camera.fov=portrait?70:55;camera.updateProjectionMatrix();
+  var visH=2*TD*Math.tan(camera.fov*Math.PI/360),visW=visH*aspect;
+  if(portrait){tcv.width=1024;tcv.height=1024;planeW=visW*0.94;planeH=planeW;}
+  else{tcv.width=1536;tcv.height=768;planeW=Math.min(visW*0.8,visH*1.3);planeH=planeW/2;}
+  layoutCache=null;lastKey='';
+}
+window.addEventListener('resize',resize);
+if(window.matchMedia){
+  var mq=window.matchMedia('(prefers-color-scheme: dark)');
+  if(mq.addEventListener)mq.addEventListener('change',applyTheme);
+}
+new MutationObserver(applyTheme).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+
+/* ---------- transport ---------- */
+var reduced=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var playing=!reduced,t=0,audio=null,audioCtx=null,analyser=null,levelBuf=null,level=0,scrubbing=false;
+function duration(){return audio&&isFinite(audio.duration)?audio.duration:lyricsEnd;}
+function refreshDuration(){scrub.max=String(duration());}
+function setPlaying(p){
+  playing=p;
+  playBtn.textContent=p?'일시정지':'재생';
+  if(audio){
+    if(p){
+      if(!audioCtx){
+        try{
+          var AC=window.AudioContext||window.webkitAudioContext;
+          audioCtx=new AC();analyser=audioCtx.createAnalyser();analyser.fftSize=512;
+          levelBuf=new Uint8Array(analyser.fftSize);
+          var src=audioCtx.createMediaElementSource(audio);
+          src.connect(analyser);analyser.connect(audioCtx.destination);
+        }catch(e){analyser=null;}
+      }
+      if(audioCtx&&audioCtx.state==='suspended')audioCtx.resume();
+      audio.play().catch(function(){playing=false;playBtn.textContent='재생';setStatus('음원을 재생하지 못했습니다. 다른 파일로 시도해 주세요.',true);});
+    }else audio.pause();
+  }
+}
+playBtn.textContent=playing?'일시정지':'재생';
+playBtn.addEventListener('click',function(){setPlaying(!playing);});
+scrub.addEventListener('input',function(){
+  scrubbing=true;t=parseFloat(scrub.value)||0;
+  if(audio)audio.currentTime=t;
+  curIdx=-2;
+});
+scrub.addEventListener('change',function(){scrubbing=false;});
+
+function loadLyricFile(file){
+  var fr=new FileReader();
+  fr.onload=function(){
+    var res=parseLyrics(String(fr.result||''));
+    if(!res.lines.length){setStatus('이 파일에서 가사 줄을 찾지 못했습니다. .lrc 또는 줄바꿈된 텍스트 파일을 올려 주세요.',true);return;}
+    setLyrics(res);t=0;if(audio)audio.currentTime=0;
+    setStatus('가사 '+res.lines.length+'줄 불러옴'+(res.plain?' · 시간 정보가 없어 균등하게 배치했습니다':''));
+  };
+  fr.onerror=function(){setStatus('가사 파일을 읽지 못했습니다.',true);};
+  fr.readAsText(file);
+}
+function loadAudioFile(file){
+  var wasPlaying=playing;
+  if(audio){audio.pause();}
+  if(audioCtx){try{audioCtx.close();}catch(e){}audioCtx=null;analyser=null;}
+  audio=new Audio();audio.preload='auto';
+  audio.src=URL.createObjectURL(file);
+  audio.addEventListener('loadedmetadata',function(){
+    if(lyricsPlain){spreadPlain(audio.duration);lastKey='';curIdx=-2;}
+    refreshDuration();
+  });
+  audio.addEventListener('ended',function(){playing=false;playBtn.textContent='재생';});
+  audio.addEventListener('error',function(){setStatus('이 음원 파일은 재생할 수 없습니다.',true);});
+  t=0;playing=false;playBtn.textContent='재생';
+  setStatus('음원 불러옴: '+file.name+' · 재생을 누르면 시작합니다');
+  void wasPlaying;
+}
+function routeFile(file){
+  if(!file)return;
+  if(/^audio\//.test(file.type)||/\.(mp3|m4a|wav|ogg|flac|aac)$/i.test(file.name))loadAudioFile(file);
+  else loadLyricFile(file);
+}
+$('lrcFile').addEventListener('change',function(e){routeFile(e.target.files[0]);e.target.value='';});
+$('audioFile').addEventListener('change',function(e){routeFile(e.target.files[0]);e.target.value='';});
+var drop=$('drop'),dragDepth=0;
+window.addEventListener('dragenter',function(e){e.preventDefault();dragDepth++;drop.hidden=false;});
+window.addEventListener('dragover',function(e){e.preventDefault();});
+window.addEventListener('dragleave',function(){dragDepth=Math.max(0,dragDepth-1);if(!dragDepth)drop.hidden=true;});
+window.addEventListener('drop',function(e){
+  e.preventDefault();dragDepth=0;drop.hidden=true;
+  var fs=e.dataTransfer&&e.dataTransfer.files;
+  if(fs)for(var i=0;i<fs.length;i++)routeFile(fs[i]);
+});
+
+/* ---------- loop ---------- */
+var lastWall=performance.now(),boil=0,boilAcc=0;
+function frame(now){
+  requestAnimationFrame(frame);
+  var dt=Math.min(0.1,(now-lastWall)/1000);lastWall=now;
+  if(audio){
+    if(!scrubbing)t=audio.currentTime;
+  }else if(playing){
+    t+=dt;if(t>lyricsEnd)t=0;
+  }
+  if(playing||scrubbing){boilAcc+=dt;if(boilAcc>0.1){boilAcc=0;boil++;}}
+  if(analyser&&playing){
+    analyser.getByteTimeDomainData(levelBuf);
+    var sum=0;for(var i=0;i<levelBuf.length;i++){var v=(levelBuf[i]-128)/128;sum+=v*v;}
+    level=lerp(level,Math.min(1,Math.sqrt(sum/levelBuf.length)*3),0.25);
+  }else level=lerp(level,0,0.1);
+
+  var amp=1+level*1.8;
+  updateWater(t,boil,amp);
+  updateCamera(t,boil);
+
+  for(var r=0;r<ripples.length;r++){
+    var rp=ripples[r],p=((t/rp.period+rp.phase)%1+1)%1,rad=0.3+p*4.2;
+    rp.mesh.position.set(rp.x,waveH(rp.x,rp.z,t)*amp+0.12,rp.z);
+    rp.mesh.scale.set(rad,1,rad);
+    rp.mesh.rotation.y=hash(r+boil*31)*0.3;
+    rp.mesh.material.opacity=(1-p)*0.8;
+  }
+  for(var b=0;b<bubbles.length;b++){
+    var bb=bubbles[b],bp=((t*bb.speed+bb.phase)%1+1)%1;
+    bb.mesh.position.set(bb.x+Math.sin(t*1.3+b)*0.4,-15+bp*14.4,bb.z);
+    bb.mesh.quaternion.copy(camera.quaternion);
+    bb.mesh.rotateZ(hash(b*5+boil*17)*6.28);
+    var s=bb.size*(0.6+bp*0.6);bb.mesh.scale.set(s,s,s);
+  }
+  moon.rotation.z=(hash(boil*13)-0.5)*0.05;
+  var ms=1+level*0.08;moon.scale.set(ms,ms,ms);
+
+  updateLyric(t,dt,boil,level);
+  renderer.render(scene,camera);
+
+  if(!scrubbing)scrub.value=String(t);
+  clockEl.textContent=fmt(t)+' / '+fmt(duration());
+}
+
+applyTheme();resize();refreshDuration();
+if(document.fonts&&document.fonts.load){
+  var all='';for(var i=0;i<DEMO.length;i++)all+=DEMO[i].text;
+  document.fonts.load('700 64px Gaegu',all).then(function(){layoutCache=null;lastKey='';},function(){});
+}
+if(reduced)t=1.2;
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
